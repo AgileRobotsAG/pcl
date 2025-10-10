@@ -262,7 +262,7 @@ pcl::LINEMOD::removeOverlappingDetections (
   {
     LINEMODDetection detection;
     const std::vector<size_t>& cluster = it->second;
-    if (clusteringMethod == ClusteringMethod::ARVERAGE_AND_MERGE) {
+    if (clusteringMethod == ClusteringMethod::AVERAGE_AND_MERGE) {
       float weight_sum = 0.0f;
 
       float average_score = 0.0f;

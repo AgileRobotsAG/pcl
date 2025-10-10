@@ -372,7 +372,7 @@ namespace pcl
       enum class ClusteringMethod: int
       {
         NON_MAX_SUPPRESSION,
-        ARVERAGE_AND_MERGE
+        AVERAGE_AND_MERGE
       };
 
       void
