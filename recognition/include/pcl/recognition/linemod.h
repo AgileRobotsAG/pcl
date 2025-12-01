@@ -35,11 +35,12 @@
  *
  */
 
-#pragma once
+#ifndef PCL_RECOGNITION_LINEMOD
+#define PCL_RECOGNITION_LINEMOD
 
 #include <vector>
 #include <cstddef>
-#include <cstring>
+#include <string.h>
 #include <pcl/pcl_macros.h>
 #include <pcl/recognition/quantizable_modality.h>
 #include <pcl/recognition/region_xy.h>
@@ -55,26 +56,31 @@ namespace pcl
   {
     public:
       /** \brief Constructor. */
-      EnergyMaps () = default;
+      EnergyMaps () : width_ (0), height_ (0), nr_bins_ (0), maps_ (NULL), map_size_(0)
+      {
+      }
+
       /** \brief Destructor. */
-      virtual ~EnergyMaps () = default;
+      virtual ~EnergyMaps () 
+      {
+      }
 
       /** \brief Returns the width of the energy maps. */
-      inline std::size_t 
+      inline size_t 
       getWidth () const 
       { 
         return (width_); 
       }
       
       /** \brief Returns the height of the energy maps. */
-      inline std::size_t 
+      inline size_t 
       getHeight () const 
       { 
         return (height_); 
       }
       
       /** \brief Returns the number of bins used for quantization (which is equal to the number of energy maps). */
-      inline std::size_t 
+      inline size_t 
       getNumOfBins () const
       { 
         return (nr_bins_);
@@ -86,35 +92,32 @@ namespace pcl
         * \param[in] nr_bins the number of bins used for quantization.
         */
       void 
-      initialize (const std::size_t width, const std::size_t height, const std::size_t nr_bins)
+      initialize (const size_t width, const size_t height, const size_t nr_bins)
       {
-        maps_.resize(nr_bins, nullptr);
         width_ = width;
         height_ = height;
         nr_bins_ = nr_bins;
 
-        const std::size_t mapsSize = width*height;
+        // Makes sure each map is aligned to 32 bytes
+        map_size_ = (((width * height) + 31) / 32) * 32;
 
-        for (auto &map : maps_)
-        {
-          //maps_[map_index] = new unsigned char[mapsSize];
-          map = reinterpret_cast<unsigned char*> (aligned_malloc (mapsSize));
-          std::fill_n(map, mapsSize, 0);
-        }
+        //maps_ = reinterpret_cast<unsigned char*> (aligned_malloc (map_size_ * nr_bins));
+        posix_memalign ((void **) &maps_, 32, map_size_ * nr_bins);
+        memset (maps_, 0, map_size_ * nr_bins);
       }
 
       /** \brief Releases the internal data. */
       void 
       releaseAll ()
       {
-        for (auto &map : maps_)
-          //if (maps_[map_index] != NULL) delete[] maps_[map_index];
-          if (map != nullptr) aligned_free (map);
+        //aligned_free(maps_);
+        std::free(maps_);
+        maps_ = NULL;
 
-        maps_.clear ();
         width_ = 0;
         height_ = 0;
         nr_bins_ = 0;
+        map_size_ = 0;
       }
 
       /** \brief Operator for accessing a specific element in the set of energy maps.
@@ -123,9 +126,9 @@ namespace pcl
         * \param[in] row_index the row index within the specified energy map.
         */
       inline unsigned char & 
-      operator() (const std::size_t bin_index, const std::size_t col_index, const std::size_t row_index)
+      operator() (const size_t bin_index, const size_t col_index, const size_t row_index)
       {
-        return (maps_[bin_index][row_index*width_ + col_index]);
+        return *(maps_ + bin_index * map_size_ + row_index * width_ + col_index);
       }
 
       /** \brief Operator for accessing a specific element in the set of energy maps.
@@ -133,18 +136,18 @@ namespace pcl
         * \param[in] index the element index within the specified energy map.
         */
       inline unsigned char & 
-      operator() (const std::size_t bin_index, const std::size_t index)
+      operator() (const size_t bin_index, const size_t index)
       {
-        return (maps_[bin_index][index]);
+        return *(maps_ + bin_index * map_size_ + index);
       }
 
       /** \brief Returns a pointer to the data of the specified energy map.
         * \param[in] bin_index the index of the energy map to return (== the quantization bin).
         */
       inline unsigned char * 
-      operator() (const std::size_t bin_index)
+      operator() (const size_t bin_index)
       {
-        return (maps_[bin_index]);
+        return maps_ + bin_index * map_size_;
       }
 
       /** \brief Operator for accessing a specific element in the set of energy maps.
@@ -153,9 +156,9 @@ namespace pcl
         * \param[in] row_index the row index within the specified energy map.
         */
       inline const unsigned char & 
-      operator() (const std::size_t bin_index, const std::size_t col_index, const std::size_t row_index) const
+      operator() (const size_t bin_index, const size_t col_index, const size_t row_index) const
       {
-        return (maps_[bin_index][row_index*width_ + col_index]);
+        return *(maps_ + bin_index * map_size_ + row_index * width_ + col_index);
       }
 
       /** \brief Operator for accessing a specific element in the set of energy maps.
@@ -163,29 +166,31 @@ namespace pcl
         * \param[in] index the element index within the specified energy map.
         */
       inline const unsigned char & 
-      operator() (const std::size_t bin_index, const std::size_t index) const
+      operator() (const size_t bin_index, const size_t index) const
       {
-        return (maps_[bin_index][index]);
+        return *(maps_ + bin_index * map_size_ + index);
       }
 
       /** \brief Returns a pointer to the data of the specified energy map.
         * \param[in] bin_index the index of the energy map to return (== the quantization bin).
         */
       inline const unsigned char * 
-      operator() (const std::size_t bin_index) const
+      operator() (const size_t bin_index) const
       {
-        return (maps_[bin_index]);
+        return maps_ + bin_index * map_size_;
       }
 
     private:
       /** \brief The width of the energy maps. */
-      std::size_t width_{0};
+      size_t width_;
       /** \brief The height of the energy maps. */
-      std::size_t height_{0};
+      size_t height_;
       /** \brief The number of quantization bins (== the number of internally stored energy maps). */
-      std::size_t nr_bins_{0};
+      size_t nr_bins_;
       /** \brief Storage for the energy maps. */
-      std::vector<unsigned char*> maps_;
+      unsigned char* maps_;
+
+      size_t map_size_;
   };
 
   /** \brief Stores a set of linearized maps.
@@ -195,25 +200,29 @@ namespace pcl
   {
     public:
       /** \brief Constructor. */
-      LinearizedMaps () = default;
+      LinearizedMaps () : width_ (0), height_ (0), mem_width_ (0), mem_height_ (0), step_size_ (0), maps_ ()
+      {
+      }
       
       /** \brief Destructor. */
-      virtual ~LinearizedMaps () = default;
+      virtual ~LinearizedMaps () 
+      {
+      }
 
       /** \brief Returns the width of the linearized map. */
-      inline std::size_t 
+      inline size_t 
       getWidth () const { return (width_); }
       
       /** \brief Returns the height of the linearized map. */
-      inline std::size_t 
+      inline size_t 
       getHeight () const { return (height_); }
       
       /** \brief Returns the step-size used to construct the linearized map. */
-      inline std::size_t 
+      inline size_t 
       getStepSize () const { return (step_size_); }
       
       /** \brief Returns the size of the memory map. */
-      inline std::size_t 
+      inline size_t 
       getMapMemorySize () const { return (mem_width_ * mem_height_); }
 
       /** \brief Initializes the linearized map.
@@ -222,34 +231,31 @@ namespace pcl
         * \param[in] step_size the step-size used to sample the source map.
         */
       void 
-      initialize (const std::size_t width, const std::size_t height, const std::size_t step_size)
+      initialize (const size_t width, const size_t height, const size_t step_size)
       {
-        maps_.resize(step_size*step_size, nullptr);
         width_ = width;
         height_ = height;
         mem_width_ = width / step_size;
         mem_height_ = height / step_size;
         step_size_ = step_size;
 
-        const std::size_t mapsSize = mem_width_ * mem_height_;
+        map_size_ = (((2 * mem_width_ * mem_height_) + 15) / 16) * 16;
 
-        for (auto &map : maps_)
-        {
-          //maps_[map_index] = new unsigned char[2*mapsSize];
-          map = reinterpret_cast<unsigned char*> (aligned_malloc (2*mapsSize));
-          std::fill_n(map, 2*mapsSize, 0);
-        }
+        maps_ = reinterpret_cast<unsigned char*> (aligned_malloc (step_size * step_size * map_size_));
+        memset (maps_, 0, step_size * step_size * map_size_);
       }
 
       /** \brief Releases the internal memory. */
       void 
       releaseAll ()
       {
-        for (auto &map : maps_)
-          //if (maps_[map_index] != NULL) delete[] maps_[map_index];
-          if (map != nullptr) aligned_free (map);
+        aligned_free(maps_);
+        maps_ = NULL;
+        // for (size_t map_index = 0; map_index < maps_.size (); ++map_index)
+        //   //if (maps_[map_index] != NULL) delete[] maps_[map_index];
+        //   if (maps_[map_index] != NULL) aligned_free (maps_[map_index]);
 
-        maps_.clear ();
+        // maps_.clear ();
         width_ = 0;
         height_ = 0;
         mem_width_ = 0;
@@ -262,9 +268,9 @@ namespace pcl
         * \param[in] row_index the row index.
         */
       inline unsigned char * 
-      operator() (const std::size_t col_index, const std::size_t row_index)
+      operator() (const size_t col_index, const size_t row_index)
       {
-        return (maps_[row_index*step_size_ + col_index]);
+        return maps_ + (row_index*step_size_ + col_index) * map_size_;
       }
 
       /** \brief Returns a linearized map starting at the specified position.
@@ -272,30 +278,32 @@ namespace pcl
         * \param[in] row_index the row index at which the returned map starts.
         */
       inline unsigned char * 
-      getOffsetMap (const std::size_t col_index, const std::size_t row_index)
+      getOffsetMap (const size_t col_index, const size_t row_index)
       {
-        const std::size_t map_col = col_index % step_size_;
-        const std::size_t map_row = row_index % step_size_;
+        const size_t map_col = col_index % step_size_;
+        const size_t map_row = row_index % step_size_;
 
-        const std::size_t map_mem_col_index = col_index / step_size_;
-        const std::size_t map_mem_row_index = row_index / step_size_;
+        const size_t map_mem_col_index = col_index / step_size_;
+        const size_t map_mem_row_index = row_index / step_size_;
 
-        return (maps_[map_row*step_size_ + map_col] + map_mem_row_index*mem_width_ + map_mem_col_index);
+        return maps_ + (map_row*step_size_ + map_col) * map_size_ + map_mem_row_index*mem_width_ + map_mem_col_index;
       }
 
     private:
       /** \brief the original width of the data represented by the map. */
-      std::size_t width_{0};
+      size_t width_;
       /** \brief the original height of the data represented by the map. */
-      std::size_t height_{0};
+      size_t height_;
       /** \brief the actual width of the linearized map. */
-      std::size_t mem_width_{0};
+      size_t mem_width_;
       /** \brief the actual height of the linearized map. */
-      std::size_t mem_height_{0};
+      size_t mem_height_;
       /** \brief the step-size used for sampling the original data. */
-      std::size_t step_size_{0};
+      size_t step_size_;
       /** \brief a vector containing all the linearized maps. */
-      std::vector<unsigned char*> maps_;
+      unsigned char* maps_;
+
+      size_t map_size_;
   };
 
   /** \brief Represents a detection of a template using the LINEMOD approach.
@@ -304,24 +312,23 @@ namespace pcl
   struct PCL_EXPORTS LINEMODDetection
   {
     /** \brief Constructor. */
-    LINEMODDetection () = default;
+    LINEMODDetection () : x (0), y (0), template_id (0), score (0.0f), scale (1.0f) {}
 
     /** \brief x-position of the detection. */
-    int x{0};
+    int x;
     /** \brief y-position of the detection. */
-    int y{0};
+    int y;
     /** \brief ID of the detected template. */
-    int template_id{0};
+    int template_id;
     /** \brief score of the detection. */
-    float score{0.0f};
+    float score;
     /** \brief scale at which the template was detected. */
-    float scale{1.0f};
+    float scale;
   };
 
   /**
     * \brief Template matching using the LINEMOD approach.
     * \author Stefan Holzer, Stefan Hinterstoisser
-    * \ingroup recognition
     */
   class PCL_EXPORTS LINEMOD
   {
@@ -340,13 +347,42 @@ namespace pcl
       int 
       createAndAddTemplate (const std::vector<QuantizableModality*> & modalities,
                             const std::vector<MaskMap*> & masks,
-                            const RegionXY & region);
+                            const RegionXY & region,
+                            size_t nr_features_per_modality = 63);
+
+
+      void
+      createTemplate (const std::vector<QuantizableModality*> & modalities,
+                      const std::vector<MaskMap*> & masks,
+                      const RegionXY & region,
+                      SparseQuantizedMultiModTemplate & linemod_template,
+                      size_t nr_features_per_modality = 63) const;
 
       /** \brief Adds the specified template to the matching queue.
         * \param[in] linemod_template the template to add.
         */
       int
       addTemplate (const SparseQuantizedMultiModTemplate & linemod_template);
+
+      void
+      groupAndSortOverlappingDetections (const std::vector<LINEMODDetection> & detections,
+                                         std::vector<std::vector<LINEMODDetection>>& grouped_detections,
+                                         const size_t grouping_threshold) const;
+      
+      enum class ClusteringMethod: int
+      {
+        NON_MAX_SUPPRESSION,
+        AVERAGE_AND_MERGE
+      };
+
+      void
+      removeOverlappingDetections (std::vector<LINEMODDetection> & detections,
+                                   size_t translation_clustering_threshold,
+                                   float rotation_clustering_threshold,
+                                   ClusteringMethod clusteringMethod = ClusteringMethod::NON_MAX_SUPPRESSION) const;
+
+      void
+      sortDetections (std::vector<LINEMODDetection> & detections) const;
 
       /** \brief Detects the stored templates in the supplied modality data.
         * \param[in] modalities the modalities that will be used for detection.
@@ -362,6 +398,7 @@ namespace pcl
         * \param[out] detections the destination for the detections.
         * \param[in] min_scale the minimum scale.
         * \param[in] max_scale the maximum scale.
+        * \param[in] importanceOfDepthModality the weight of the depth modality in the detection. (-1.0 means no depth modality, 1.0 means only depth modality)
         * \param[in] scale_multiplier the multiplier for getting from one scale to the next.
         */
       void
@@ -369,7 +406,26 @@ namespace pcl
                                          std::vector<LINEMODDetection> & detections,
                                          float min_scale = 0.6944444f,
                                          float max_scale = 1.44f,
-                                         float scale_multiplier = 1.2f) const;
+                                         float scale_multiplier = 1.2f,
+                                         float importanceOfDepthModality = 0.0f) const;
+
+      /**
+       * @brief Given existing detections, evaluate these detections' linemod score.
+       * 
+       * @param modalities 
+       * @param inputDetections 
+       * @param inputTemplates       corresponding templates for each detection
+       * @param importanceOfDepthModality  weight of the depth modality in the evaluation
+       * @param evaluationScores     output
+       */
+      void
+      evaluateDetections(
+        const std::vector<QuantizableModality*>& modalities,
+        const std::vector<LINEMODDetection>& inputDetections,
+        const std::vector<SparseQuantizedMultiModTemplate>& inputTemplates,
+        const float importanceOfDepthModality,
+        std::vector<float>& evaluationScores
+      ) const;
 
       /** \brief Matches the stored templates to the supplied modality data.
         * \param[in] modalities the modalities that will be used for matching.
@@ -386,6 +442,13 @@ namespace pcl
       setDetectionThreshold (float threshold)
       {
         template_threshold_ = threshold;
+      }
+
+      inline void
+      setClusteringThresholds (const size_t translation_threshold = 0, const float rotation_threshold = 0)
+      {
+        translation_clustering_threshold_ = translation_threshold;
+        rotation_clustering_threshold_ = rotation_threshold;
       }
 
       /** \brief Enables/disables non-maximum suppression.
@@ -416,7 +479,7 @@ namespace pcl
       }
 
       /** \brief Returns the number of stored/trained templates. */
-      inline std::size_t
+      inline size_t
       getNumOfTemplates () const
       {
         return (templates_.size ());
@@ -453,16 +516,37 @@ namespace pcl
       void 
       deserialize (std::istream & stream);
 
+      inline SparseQuantizedMultiModTemplate &
+      getTemplate (int template_id)
+      {
+        return (templates_[template_id]);
+      }
+
+      inline void
+      resizeTemplates (size_t n)
+      {
+        return templates_.resize(n);
+      }
+
+      float getScoreThreshold() const
+      {
+        return template_threshold_;
+      }
+
 
     private:
       /** template response threshold */
-      float template_threshold_{0.75f};
+      float template_threshold_;
+      size_t translation_clustering_threshold_;
+      float rotation_clustering_threshold_;
       /** states whether non-max-suppression on detections is enabled or not */
-      bool use_non_max_suppression_{false};
+      bool use_non_max_suppression_;
       /** states whether to return an averaged detection */
-      bool average_detections_{false};
+      bool average_detections_;
       /** template storage */
-      std::vector<SparseQuantizedMultiModTemplate> templates_{};
+      std::vector<SparseQuantizedMultiModTemplate> templates_;
   };
 
 }
+
+#endif 
