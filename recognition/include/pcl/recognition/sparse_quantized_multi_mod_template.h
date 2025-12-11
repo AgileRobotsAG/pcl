@@ -116,6 +116,13 @@ namespace pcl
     /** \brief The region assigned to the template. */
     RegionXY region;
 
+    /** \brief Rotation around x-axis (in radians). */
+    float rx{0.0f};
+    /** \brief Rotation around y-axis (in radians). */
+    float ry{0.0f};
+    /** \brief Rotation around z-axis (in radians). */
+    float rz{0.0f};
+
     /** \brief Serializes the object to the specified stream.
       * \param[out] stream the stream the object will be serialized to. */
     void
@@ -129,6 +136,9 @@ namespace pcl
       }
 
       region.serialize (stream);
+      write (stream, rx);
+      write (stream, ry);
+      write (stream, rz);
     }
 
     /** \brief Deserializes the object from the specified stream.
@@ -147,6 +157,27 @@ namespace pcl
       }
 
       region.deserialize (stream);
+      
+      // Backward compatibility: Check if rotation data exists in the stream
+      // Old template files don't have rx, ry, rz fields
+      std::streampos pos_before = stream.tellg();
+      stream.seekg(0, std::ios::end);
+      std::streampos pos_end = stream.tellg();
+      stream.seekg(pos_before);
+      
+      // Check if there's enough data left for 3 floats (12 bytes)
+      const size_t rotation_data_size = 3 * sizeof(float);
+      if (pos_end - pos_before >= static_cast<std::streamoff>(rotation_data_size)) {
+        // New format - rotation data exists
+        read (stream, rx);
+        read (stream, ry);
+        read (stream, rz);
+      } else {
+        // Old format - no rotation data, use defaults
+        rx = 0.0f;
+        ry = 0.0f;
+        rz = 0.0f;
+      }
     }
   };
 

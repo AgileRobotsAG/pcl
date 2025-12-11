@@ -8,7 +8,7 @@
 #include <random>
 
 //Uncomment the following lines and set PCL_FACE_DETECTION_VIS_TRAINING_FDDP to 1
-//to visualize the training process and change the CMakeLists.txt accordingly.
+//to visualize the training process and change the package.cmake accordingly.
 //#include <pcl/visualization/pcl_visualizer.h>
 //#define PCL_FACE_DETECTION_VIS_TRAINING_FDDP 1
 //TODO: This is not very good as it forces recognition to depend on pcl_visualization

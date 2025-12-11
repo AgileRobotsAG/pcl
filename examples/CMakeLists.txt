@@ -12,7 +12,7 @@ endif()
 # this variable will filled with all targets added with pcl_add_example
 set(PCL_EXAMPLES_ALL_TARGETS)
 
-# This looks for all examples/XXX/CMakeLists.txt
+# This looks for all examples/XXX/package.cmake
 file (GLOB examples_sbudirs */CMakeLists.txt)
 # Extract only relevant XXX and append it to PCL_EXAMPLES_SUBDIRS
 foreach(subdir ${examples_sbudirs})

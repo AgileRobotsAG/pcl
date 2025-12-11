@@ -85,7 +85,7 @@ TEST (TestMeshIO, WriteAndRead)
   ASSERT_TRUE (expected_mesh.addFace (vi [7], vi [9], vi [10]).isValid ());
   ASSERT_TRUE (expected_mesh.addFace (vi [5], vi [6], vi [ 7]).isValid ());
 
-  // 'PCL_TEST_GEOMETRY_BINARY_DIR' defined in CMakeLists.txt
+  // 'PCL_TEST_GEOMETRY_BINARY_DIR' defined in package.cmake
   std::string filename = std::string (PCL_TEST_GEOMETRY_BINARY_DIR).append ("/test_mesh_io_mesh_tmp.txt");
   MeshIO io;
 

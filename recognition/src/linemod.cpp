@@ -50,6 +50,7 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#include <cstdint>
 
 //#define LINEMOD_USE_SEPARATE_ENERGY_MAPS
 

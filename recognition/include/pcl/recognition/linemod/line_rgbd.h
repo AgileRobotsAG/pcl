@@ -124,6 +124,24 @@ namespace pcl
       bool
       addTemplate (const SparseQuantizedMultiModTemplate & sqmmt, pcl::PointCloud<pcl::PointXYZRGBA> & cloud, std::size_t object_id = 0);
 
+      /** \brief Returns a reference to the LINEMOD instance.
+        * \return Reference to the LINEMOD instance.
+        */
+      inline pcl::LINEMOD &
+      getLineMOD ()
+      {
+        return linemod_;
+      }
+
+      /** \brief Returns a const reference to the LINEMOD instance.
+        * \return Const reference to the LINEMOD instance.
+        */
+      inline const pcl::LINEMOD &
+      getLineMOD () const
+      {
+        return linemod_;
+      }
+
       /** \brief Sets the threshold for the detection responses. Responses are between 0 and 1, where 1 is a best. 
         * \param[in] threshold The threshold used to decide where a template is detected.
         */
