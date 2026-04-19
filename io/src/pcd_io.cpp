@@ -435,6 +435,16 @@ pcl::PCDReader::readHeader (const std::string &file_name, pcl::PCLPointCloud2 &c
   // Close file
   fs.close ();
 
+  // The istream overload sets data_idx via fs.tellg(), which after fs.seekg(offset)
+  // is the *absolute* byte position of the data section. Callers (e.g. read()) add
+  // `offset` again to reach the data, so they would double-count. Normalise data_idx
+  // to be relative to the PCD start (i.e. the size of the PCD's own header). For
+  // standalone files (offset == 0) this is a no-op; for PCDs embedded inside a TAR
+  // (LineMOD .lmt) it eliminates the double-count that produced bogus compressed_size
+  // / "Corrupted PCD file" warnings in PCDReader::read().
+  if (result == 0 && offset > 0 && data_idx >= static_cast<unsigned int> (offset))
+    data_idx -= static_cast<unsigned int> (offset);
+
   return result;
 }
 

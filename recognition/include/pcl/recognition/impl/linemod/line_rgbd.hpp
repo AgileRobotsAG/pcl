@@ -42,6 +42,7 @@
 #include <pcl/io/pcd_io.h>
 #include <fcntl.h>
 #include <pcl/point_cloud.h>
+#include <cerrno>
 #include <limits>
 
 
@@ -90,8 +91,10 @@ LineRGBD<PointXYZT, PointRGBT>::loadTemplates (const std::string &file_name, con
   std::string sqmmt_ext (".sqmmt");
 
   // While there still is an LTM header to be read
+  std::size_t ltm_member_index = 0;
   while (readLTMHeader (ltm_fd, ltm_header))
   {
+    const int header_offset = ltm_offset;
     ltm_offset += 512;
 
     // Search for extension
@@ -100,29 +103,46 @@ LineRGBD<PointXYZT, PointRGBT>::loadTemplates (const std::string &file_name, con
     std::transform (chunk_name.begin (), chunk_name.end (), chunk_name.begin (), ::tolower);
     std::string::size_type it;
 
+    const unsigned int member_size = ltm_header.getFileSize ();
+    PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] LTM[%zu] header@%d name='%s' size=%u type='%c'\n",
+               ltm_member_index, header_offset, chunk_name.c_str (), member_size,
+               ltm_header.file_type[0] ? ltm_header.file_type[0] : '0');
+
     if ((it = chunk_name.find (pcd_ext)) != std::string::npos &&
         (pcd_ext.size () - (chunk_name.size () - it)) == 0)
     {
-      PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] Reading and parsing %s as a PCD file.\n", chunk_name.c_str ());
+      PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] LTM[%zu] reading PCD payload@%d size=%u\n",
+                 ltm_member_index, ltm_offset, member_size);
       // Read the next PCD file
       template_point_clouds_.resize (template_point_clouds_.size () + 1);
-      pcd_reader.read (file_name, template_point_clouds_[template_point_clouds_.size () - 1], ltm_offset);
+      const int pcd_res = pcd_reader.read (file_name,
+                                           template_point_clouds_[template_point_clouds_.size () - 1],
+                                           ltm_offset);
+      if (pcd_res != 0)
+      {
+        PCL_ERROR ("[pcl::LineRGBD::loadTemplates] LTM[%zu] PCDReader::read failed (rc=%d) at payload@%d (member '%s', size=%u)\n",
+                   ltm_member_index, pcd_res, ltm_offset, chunk_name.c_str (), member_size);
+      }
 
-      // Increment the offset for the next file
-      ltm_offset += (ltm_header.getFileSize ()) + (512 - ltm_header.getFileSize () % 512);
+      // Increment the offset for the next file (USTAR pads file payload to a 512-byte boundary;
+      // when size is already a multiple of 512, padding is 0 — not 512.)
+      ltm_offset += static_cast<int> (member_size) +
+                    static_cast<int> ((512 - (member_size % 512)) % 512);
     }
     else if ((it = chunk_name.find (sqmmt_ext)) != std::string::npos &&
              (sqmmt_ext.size () - (chunk_name.size () - it)) == 0)
     {
-      PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] Reading and parsing %s as a SQMMT file.\n", chunk_name.c_str ());
+      PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] LTM[%zu] reading SQMMT payload@%d size=%u\n",
+                 ltm_member_index, ltm_offset, member_size);
 
-      unsigned int fsize = ltm_header.getFileSize ();
+      unsigned int fsize = member_size;
       char *buffer = new char[fsize];
       int result = static_cast<int> (io::raw_read (ltm_fd, reinterpret_cast<char*> (&buffer[0]), fsize));
       if (result == -1)
       {
         delete [] buffer;
-        PCL_ERROR ("[pcl::LineRGBD::loadTemplates] Error reading SQMMT template from file!\n");
+        PCL_ERROR ("[pcl::LineRGBD::loadTemplates] LTM[%zu] Error reading SQMMT template (member '%s', size=%u)\n",
+                   ltm_member_index, chunk_name.c_str (), fsize);
         break;
       }
 
@@ -135,15 +155,34 @@ LineRGBD<PointXYZT, PointRGBT>::loadTemplates (const std::string &file_name, con
       linemod_.addTemplate (sqmmt);
       object_ids_.push_back (object_id);
 
-      // Increment the offset for the next file
-      ltm_offset += (ltm_header.getFileSize ()) + (512 - ltm_header.getFileSize () % 512);
+      // Increment the offset for the next file (USTAR padding; see PCD branch above.)
+      ltm_offset += static_cast<int> (member_size) +
+                    static_cast<int> ((512 - (member_size % 512)) % 512);
 
       delete [] buffer;
     }
+    else
+    {
+      // Members such as metadata.json are not used by LineRGBD but must be skipped
+      // so ltm_offset and ltm_fd stay aligned with the next 512-byte TAR header.
+      // Otherwise the next readLTMHeader consumes PCD/SQMMT bytes as a fake header
+      // and PCDReader sees nonsense sizes (corruption / mmap errors).
+      PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] LTM[%zu] skipping non-template member '%s' (size=%u)\n",
+                 ltm_member_index, chunk_name.c_str (), member_size);
+      ltm_offset += static_cast<int> (member_size) +
+                     static_cast<int> ((512 - (member_size % 512)) % 512);
+    }
 
     if (io::raw_lseek(ltm_fd, ltm_offset, SEEK_SET) < 0)
+    {
+      PCL_ERROR ("[pcl::LineRGBD::loadTemplates] LTM[%zu] lseek to next header @%d failed (errno=%d)\n",
+                 ltm_member_index, ltm_offset, errno);
       break;
+    }
+    ++ltm_member_index;
   }
+  PCL_DEBUG ("[pcl::LineRGBD::loadTemplates] Done. Members scanned=%zu, point clouds=%zu, sqmmt added=%zu\n",
+             ltm_member_index, template_point_clouds_.size (), object_ids_.size ());
 
   // Close the file
   io::raw_close(ltm_fd);
