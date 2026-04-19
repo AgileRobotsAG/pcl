@@ -345,8 +345,8 @@ endif()
 # Threads (required)
 find_package(Threads REQUIRED)
 
-# Eigen3 (required)
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+# Eigen3 (required). Do not pin 3.x: vcpkg ships Eigen 4+/5 with the same CMake package name.
+find_package(Eigen3 REQUIRED NO_MODULE)
 if(NOT EIGEN3_FOUND AND Eigen3_FOUND)
     set(EIGEN3_FOUND ${Eigen3_FOUND})
 endif()
