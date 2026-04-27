@@ -836,6 +836,24 @@ LineRGBD<PointXYZT, PointRGBT>::applyProjectiveDepthICPOnDetections ()
   }
 }
 
+template <typename PointXYZT, typename PointRGBT> const pcl::PointCloud<pcl::PointXYZRGBA>&
+LineRGBD<PointXYZT, PointRGBT>::getTemplatePointCloud (std::size_t template_id) const
+{
+  static const pcl::PointCloud<pcl::PointXYZRGBA> kEmpty;
+  if (template_id >= template_point_clouds_.size ())
+    return (kEmpty);
+  return (template_point_clouds_[template_id]);
+}
+
+template <typename PointXYZT, typename PointRGBT> const pcl::BoundingBoxXYZ&
+LineRGBD<PointXYZT, PointRGBT>::getTemplateBoundingBox (std::size_t template_id) const
+{
+  static const pcl::BoundingBoxXYZ kEmpty{};
+  if (template_id >= bounding_boxes_.size ())
+    return (kEmpty);
+  return (bounding_boxes_[template_id]);
+}
+
 
 template <typename PointXYZT, typename PointRGBT> void
 LineRGBD<PointXYZT, PointRGBT>::removeOverlappingDetections ()

@@ -142,6 +142,14 @@ namespace pcl
         return linemod_;
       }
 
+      /** \brief Const access to the organized template point cloud for a template index (empty if out of range). */
+      const pcl::PointCloud<pcl::PointXYZRGBA>&
+      getTemplatePointCloud (std::size_t template_id) const;
+
+      /** \brief Const access to the template 3D bounding box in template-centered coordinates (zeros if out of range). */
+      const pcl::BoundingBoxXYZ&
+      getTemplateBoundingBox (std::size_t template_id) const;
+
       /** \brief Sets the threshold for the detection responses. Responses are between 0 and 1, where 1 is a best. 
         * \param[in] threshold The threshold used to decide where a template is detected.
         */
