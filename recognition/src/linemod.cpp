@@ -51,6 +51,12 @@
 #include <map>
 #include <algorithm>
 #include <cstdint>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+#include <cstring>
+#include <iostream>
+#include <iterator>
 
 //#define LINEMOD_USE_SEPARATE_ENERGY_MAPS
 
@@ -599,6 +605,295 @@ pcl::LINEMOD::matchTemplates (const std::vector<QuantizableModality*> & modaliti
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////
+namespace
+{
+
+/** \brief Fixed-scale per-template LINEMOD scoring (shared modality maps; non-const due to LinearizedMaps::getOffsetMap). */
+static void
+pcl_linemodDetectTemplatesFixedScaleOne (
+    const pcl::SparseQuantizedMultiModTemplate& linemod_template,
+    int template_id,
+    float template_threshold,
+    bool use_non_max_suppression,
+    bool average_detections,
+    size_t width,
+    size_t height,
+    size_t step_size,
+    std::vector<std::vector<pcl::LinearizedMaps> >& modality_linearized_maps,
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+    std::vector<std::vector<pcl::LinearizedMaps> >& modality_linearized_maps_1,
+    std::vector<std::vector<pcl::LinearizedMaps> >& modality_linearized_maps_2,
+    std::vector<std::vector<pcl::LinearizedMaps> >& modality_linearized_maps_3,
+#endif
+#if defined (__SSE2__)
+    unsigned short* score_sums,
+    unsigned char* tmp_score_sums,
+#else
+    unsigned short* score_sums,
+#endif
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+    unsigned short* score_sums_1,
+    unsigned short* score_sums_2,
+    unsigned short* score_sums_3,
+#endif
+    std::vector<pcl::LINEMODDetection>& out_detections)
+{
+  const size_t mem_width = width / step_size;
+  const size_t mem_height = height / step_size;
+  const size_t mem_size = mem_width * mem_height;
+
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+  memset (score_sums_1, 0, mem_size*sizeof (score_sums_1[0]));
+  memset (score_sums_2, 0, mem_size*sizeof (score_sums_2[0]));
+  memset (score_sums_3, 0, mem_size*sizeof (score_sums_3[0]));
+#endif
+
+#if defined (__SSE2__)
+  memset (score_sums, 0, mem_size*sizeof (score_sums[0]));
+  memset (tmp_score_sums, 0, mem_size*sizeof (tmp_score_sums[0]));
+
+  __m128i * tmp_score_sums_m128i = reinterpret_cast<__m128i*> (tmp_score_sums);
+
+  const size_t mem_size_16 = mem_size / 16;
+  const size_t mem_size_mod_16_base = mem_size_16 * 16;
+
+  int max_score = 0;
+  size_t copy_back_counter = 0;
+  for (size_t feature_index = 0; feature_index < linemod_template.features.size (); ++feature_index)
+  {
+    const pcl::QuantizedMultiModFeature & feature = linemod_template.features[feature_index];
+
+    for (size_t bin_index = 0; bin_index < 8; ++bin_index)
+    {
+      if ((feature.quantized_value & (0x1<<bin_index)) != 0)
+      {
+        max_score += 4;
+
+        unsigned char * data = modality_linearized_maps[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
+        __m128i * data_m128i = reinterpret_cast<__m128i*> (data);
+
+        for (size_t mem_index = 0; mem_index < mem_size_16; ++mem_index)
+        {
+          __m128i aligned_data_m128i = _mm_loadu_si128 (reinterpret_cast<const __m128i*> (data_m128i + mem_index)); // SSE2
+          tmp_score_sums_m128i[mem_index] = _mm_add_epi8 (tmp_score_sums_m128i[mem_index], aligned_data_m128i);
+        }
+        for (size_t mem_index = mem_size_mod_16_base; mem_index < mem_size; ++mem_index)
+        {
+          tmp_score_sums[mem_index] = static_cast<unsigned char> (tmp_score_sums[mem_index] + data[mem_index]);
+        }
+      }
+    }
+
+    ++copy_back_counter;
+
+    if (copy_back_counter > 63) // only valid if each feature has only one bit set..
+    {
+      copy_back_counter = 0;
+
+      for (size_t mem_index = 0; mem_index < mem_size_mod_16_base; mem_index += 16)
+      {
+        score_sums[mem_index+0]  = static_cast<unsigned short> (score_sums[mem_index+0]  + tmp_score_sums[mem_index+0]);
+        score_sums[mem_index+1]  = static_cast<unsigned short> (score_sums[mem_index+1]  + tmp_score_sums[mem_index+1]);
+        score_sums[mem_index+2]  = static_cast<unsigned short> (score_sums[mem_index+2]  + tmp_score_sums[mem_index+2]);
+        score_sums[mem_index+3]  = static_cast<unsigned short> (score_sums[mem_index+3]  + tmp_score_sums[mem_index+3]);
+        score_sums[mem_index+4]  = static_cast<unsigned short> (score_sums[mem_index+4]  + tmp_score_sums[mem_index+4]);
+        score_sums[mem_index+5]  = static_cast<unsigned short> (score_sums[mem_index+5]  + tmp_score_sums[mem_index+5]);
+        score_sums[mem_index+6]  = static_cast<unsigned short> (score_sums[mem_index+6]  + tmp_score_sums[mem_index+6]);
+        score_sums[mem_index+7]  = static_cast<unsigned short> (score_sums[mem_index+7]  + tmp_score_sums[mem_index+7]);
+        score_sums[mem_index+8]  = static_cast<unsigned short> (score_sums[mem_index+8]  + tmp_score_sums[mem_index+8]);
+        score_sums[mem_index+9]  = static_cast<unsigned short> (score_sums[mem_index+9]  + tmp_score_sums[mem_index+9]);
+        score_sums[mem_index+10] = static_cast<unsigned short> (score_sums[mem_index+10] + tmp_score_sums[mem_index+10]);
+        score_sums[mem_index+11] = static_cast<unsigned short> (score_sums[mem_index+11] + tmp_score_sums[mem_index+11]);
+        score_sums[mem_index+12] = static_cast<unsigned short> (score_sums[mem_index+12] + tmp_score_sums[mem_index+12]);
+        score_sums[mem_index+13] = static_cast<unsigned short> (score_sums[mem_index+13] + tmp_score_sums[mem_index+13]);
+        score_sums[mem_index+14] = static_cast<unsigned short> (score_sums[mem_index+14] + tmp_score_sums[mem_index+14]);
+        score_sums[mem_index+15] = static_cast<unsigned short> (score_sums[mem_index+15] + tmp_score_sums[mem_index+15]);
+      }
+      for (size_t mem_index = mem_size_mod_16_base; mem_index < mem_size; ++mem_index)
+      {
+        score_sums[mem_index] = static_cast<unsigned short> (score_sums[mem_index] + tmp_score_sums[mem_index]);
+      }
+
+      memset (tmp_score_sums, 0, mem_size*sizeof (tmp_score_sums[0]));
+    }
+  }
+  {
+    for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
+    {
+      score_sums[mem_index] = static_cast<unsigned short> (score_sums[mem_index] + tmp_score_sums[mem_index]);
+    }
+
+    memset (tmp_score_sums, 0, mem_size*sizeof (tmp_score_sums[0]));
+  }
+#else  // #if defined (__SSE2__)
+  memset (score_sums, 0, mem_size*sizeof (score_sums[0]));
+
+  int max_score = 0;
+  for (size_t feature_index = 0; feature_index < linemod_template.features.size (); ++feature_index)
+  {
+    const pcl::QuantizedMultiModFeature & feature = linemod_template.features[feature_index];
+
+    for (size_t bin_index = 0; bin_index < 8; ++bin_index)
+    {
+      if ((feature.quantized_value & (0x1<<bin_index)) != 0)
+      {
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+        ++max_score;
+
+        unsigned char * data = modality_linearized_maps[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
+        unsigned char * data_1 = modality_linearized_maps_1[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
+        unsigned char * data_2 = modality_linearized_maps_2[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
+        unsigned char * data_3 = modality_linearized_maps_3[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
+        for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
+        {
+          score_sums[mem_index] += data[mem_index];
+          score_sums_1[mem_index] += data_1[mem_index];
+          score_sums_2[mem_index] += data_2[mem_index];
+          score_sums_3[mem_index] += data_3[mem_index];
+        }
+#else
+        max_score += 4;
+
+        unsigned char * data = modality_linearized_maps[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
+        for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
+        {
+          score_sums[mem_index] += data[mem_index];
+        }
+#endif
+      }
+    }
+  }
+#endif  // #if defined (__SSE2__)
+
+  const float inv_max_score = 1.0f / float (max_score);
+
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+  const float raw_threshold = (4.0f * float (max_score) / 2.0f + template_threshold * (4.0f * float (max_score) / 2.0f));
+#else
+  const float raw_threshold = (float (max_score) / 2.0f + template_threshold * (float (max_score) / 2.0f));
+#endif
+
+  for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
+  {
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+    const float raw_score = score_sums[mem_index]
+      + score_sums_1[mem_index]
+      + score_sums_2[mem_index]
+      + score_sums_3[mem_index];
+
+    const float score = 2.0f * static_cast<float> (raw_score) * 0.25f * inv_max_score - 1.0f;
+#else
+    const float raw_score = score_sums[mem_index];
+
+    const float score = 2.0f * static_cast<float> (raw_score) * inv_max_score - 1.0f;
+#endif
+
+    if (raw_score > raw_threshold)
+    {
+      const size_t mem_col_index = (mem_index % mem_width);
+      const size_t mem_row_index = (mem_index / mem_width);
+
+      if (use_non_max_suppression)
+      {
+        bool is_local_max = true;
+        for (size_t sup_row_index = mem_row_index-1; sup_row_index <= mem_row_index+1 && is_local_max; ++sup_row_index)
+        {
+          if (sup_row_index >= mem_height)
+            continue;
+
+          for (size_t sup_col_index = mem_col_index-1; sup_col_index <= mem_col_index+1; ++sup_col_index)
+          {
+            if (sup_col_index >= mem_width)
+              continue;
+
+            if (score_sums[mem_index] < score_sums[sup_row_index*mem_width + sup_col_index])
+            {
+              is_local_max = false;
+              break;
+            }
+          }
+        }
+
+        if (!is_local_max)
+          continue;
+      }
+
+      pcl::LINEMODDetection detection;
+
+      if (average_detections)
+      {
+        size_t average_col = 0;
+        size_t average_row = 0;
+        size_t sum = 0;
+
+        for (size_t sup_row_index = mem_row_index-1; sup_row_index <= mem_row_index+1; ++sup_row_index)
+        {
+          if (sup_row_index >= mem_height)
+            continue;
+
+          for (size_t sup_col_index = mem_col_index-1; sup_col_index <= mem_col_index+1; ++sup_col_index)
+          {
+            if (sup_col_index >= mem_width)
+              continue;
+
+            const size_t weight = static_cast<size_t> (score_sums[sup_row_index*mem_width + sup_col_index]);
+            average_col += sup_col_index * weight;
+            average_row += sup_row_index * weight;
+            sum += weight;
+          }
+        }
+
+        average_col *= step_size;
+        average_row *= step_size;
+
+        average_col /= sum;
+        average_row /= sum;
+
+#ifdef _OPENMP
+#pragma omp critical(pcl_linemod_detecttemplates_stderr)
+#endif
+        {
+          std::cerr << mem_col_index*step_size << ", " << mem_row_index*step_size << " - " << average_col << ", " << average_row << std::endl;
+        }
+
+        const size_t detection_col_index = average_col;
+        const size_t detection_row_index = average_row;
+
+        detection.x = static_cast<int> (detection_col_index);
+        detection.y = static_cast<int> (detection_row_index);
+      }
+      else
+      {
+        const size_t detection_col_index = mem_col_index * step_size;
+        const size_t detection_row_index = mem_row_index * step_size;
+
+        detection.x = static_cast<int> (detection_col_index);
+        detection.y = static_cast<int> (detection_row_index);
+      }
+
+      detection.template_id = template_id;
+      detection.score = score;
+
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+#ifdef _OPENMP
+#pragma omp critical(pcl_linemod_detecttemplates_stderr)
+#endif
+      {
+        std::cerr << "score: " << static_cast<float> (raw_score) * inv_max_score * 0.25f << ", " << (2.0f * static_cast<float> (raw_score) * inv_max_score - 1.0f) << std::endl;
+        std::cerr << "score0: " << static_cast<float> (score_sums[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums[mem_index]) * inv_max_score - 1.0f) << std::endl;
+        std::cerr << "score1: " << static_cast<float> (score_sums_1[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums_1[mem_index]) * inv_max_score - 1.0f) << std::endl;
+        std::cerr << "score2: " << static_cast<float> (score_sums_2[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums_2[mem_index]) * inv_max_score - 1.0f) << std::endl;
+        std::cerr << "score3: " << static_cast<float> (score_sums_3[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums_3[mem_index]) * inv_max_score - 1.0f) << std::endl;
+      }
+#endif
+
+      out_detections.push_back (detection);
+    }
+  }
+}
+
+} // namespace
+
 void
 pcl::LINEMOD::detectTemplates (const std::vector<QuantizableModality*> & modalities, std::vector<LINEMODDetection> & detections) const
 {
@@ -641,7 +936,11 @@ pcl::LINEMOD::detectTemplates (const std::vector<QuantizableModality*> & modalit
       unsigned char val1 = static_cast<unsigned char> (val0 | (base_bit << ((bin_index+1)%8)) | (base_bit << ((bin_index+7)%8))); // e.g. 01110000
       unsigned char val2 = static_cast<unsigned char> (val1 | (base_bit << ((bin_index+2)%8)) | (base_bit << ((bin_index+6)%8))); // e.g. 11111000
       unsigned char val3 = static_cast<unsigned char> (val2 | (base_bit << ((bin_index+3)%8)) | (base_bit << ((bin_index+5)%8))); // e.g. 11111101
-      for (size_t index = 0; index < width*height; ++index)
+      const size_t nr_pixels = width * height;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(nr_pixels > 4096)
+#endif
+      for (size_t index = 0; index < nr_pixels; ++index)
       {
         if ((val0 & quantized_data[index]) != 0)
           ++energy_maps (bin_index, index);
@@ -724,8 +1023,10 @@ pcl::LINEMOD::detectTemplates (const std::vector<QuantizableModality*> & modalit
           // copy data from energy maps
           const size_t lin_width = width/step_size;
           const size_t lin_height = height/step_size;
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static) if(lin_width * lin_height > 4096)
+#endif
           for (size_t row_index = 0; row_index < lin_height; ++row_index)
-          {
             for (size_t col_index = 0; col_index < lin_width; ++col_index)
             {
               const size_t tmp_col_index = col_index*step_size + map_col;
@@ -738,7 +1039,6 @@ pcl::LINEMOD::detectTemplates (const std::vector<QuantizableModality*> & modalit
               linearized_map_3[row_index*lin_width + col_index] = energy_map_3[tmp_row_index*width + tmp_col_index];
 #endif
             }
-          }
         }
       }
 
@@ -761,272 +1061,98 @@ pcl::LINEMOD::detectTemplates (const std::vector<QuantizableModality*> & modalit
   // compute scores for templates
   const size_t width = modality_energy_maps[0].getWidth ();
   const size_t height = modality_energy_maps[0].getHeight ();
+  const size_t mem_width = width / step_size;
+  const size_t mem_height = height / step_size;
+  const size_t mem_size = mem_width * mem_height;
+
+#ifdef _OPENMP
+  const int pcl_linemod_thread_slots = omp_get_max_threads ();
+#else
+  const int pcl_linemod_thread_slots = 1;
+#endif
+  std::vector<std::vector<LINEMODDetection> > thread_local_detections (static_cast<std::size_t> (pcl_linemod_thread_slots));
+
+#ifndef _OPENMP
   for (size_t template_index = 0; template_index < templates_.size (); ++template_index)
   {
-    const size_t mem_width = width / step_size;
-    const size_t mem_height = height / step_size;
-    const size_t mem_size = mem_width * mem_height;
-
+    const pcl::SparseQuantizedMultiModTemplate& linemod_template = getTemplate (static_cast<int> (template_index));
 #ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
     unsigned short * score_sums_1 = new unsigned short[mem_size];
     unsigned short * score_sums_2 = new unsigned short[mem_size];
     unsigned short * score_sums_3 = new unsigned short[mem_size];
-    memset (score_sums_1, 0, mem_size*sizeof (score_sums_1[0]));
-    memset (score_sums_2, 0, mem_size*sizeof (score_sums_2[0]));
-    memset (score_sums_3, 0, mem_size*sizeof (score_sums_3[0]));
 #endif
-
 #ifdef __SSE2__
     unsigned short * score_sums = reinterpret_cast<unsigned short*> (aligned_malloc (mem_size*sizeof(unsigned short)));
     unsigned char * tmp_score_sums = reinterpret_cast<unsigned char*> (aligned_malloc (mem_size*sizeof(unsigned char)));
-    memset (score_sums, 0, mem_size*sizeof (score_sums[0]));
-    memset (tmp_score_sums, 0, mem_size*sizeof (tmp_score_sums[0]));
-
-    //__m128i * score_sums_m128i = reinterpret_cast<__m128i*> (score_sums);
-    __m128i * tmp_score_sums_m128i = reinterpret_cast<__m128i*> (tmp_score_sums);
-
-    const size_t mem_size_16 = mem_size / 16;
-    //const size_t mem_size_mod_16 = mem_size & 15;
-    const size_t mem_size_mod_16_base = mem_size_16 * 16;
-
-    int max_score = 0;
-    size_t copy_back_counter = 0;
-    for (size_t feature_index = 0; feature_index < templates_[template_index].features.size (); ++feature_index)
-    {
-      const QuantizedMultiModFeature & feature = templates_[template_index].features[feature_index];
-
-      for (size_t bin_index = 0; bin_index < 8; ++bin_index)
-      {
-        if ((feature.quantized_value & (0x1<<bin_index)) != 0)
-        {
-          max_score += 4;
-
-          unsigned char * data = modality_linearized_maps[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
-          __m128i * data_m128i = reinterpret_cast<__m128i*> (data);
-
-          for (size_t mem_index = 0; mem_index < mem_size_16; ++mem_index)
-          {
-            __m128i aligned_data_m128i = _mm_loadu_si128 (reinterpret_cast<const __m128i*> (data_m128i + mem_index)); // SSE2
-            //__m128i aligned_data_m128i = _mm_lddqu_si128 (reinterpret_cast<const __m128i*> (data_m128i + mem_index)); // SSE3
-            tmp_score_sums_m128i[mem_index] = _mm_add_epi8 (tmp_score_sums_m128i[mem_index], aligned_data_m128i);
-          }
-          for (size_t mem_index = mem_size_mod_16_base; mem_index < mem_size; ++mem_index)
-          {
-            tmp_score_sums[mem_index] = static_cast<unsigned char> (tmp_score_sums[mem_index] + data[mem_index]);
-          }
-        }
-      }
-
-      ++copy_back_counter;
-
-      //if ((feature_index & 7) == 7)
-      //if ((feature_index & 63) == 63)
-      if (copy_back_counter > 63) // only valid if each feature has only one bit set..
-      {
-        copy_back_counter = 0;
-
-        for (size_t mem_index = 0; mem_index < mem_size_mod_16_base; mem_index += 16)
-        {
-          score_sums[mem_index+0]  = static_cast<unsigned short> (score_sums[mem_index+0]  + tmp_score_sums[mem_index+0]);
-          score_sums[mem_index+1]  = static_cast<unsigned short> (score_sums[mem_index+1]  + tmp_score_sums[mem_index+1]);
-          score_sums[mem_index+2]  = static_cast<unsigned short> (score_sums[mem_index+2]  + tmp_score_sums[mem_index+2]);
-          score_sums[mem_index+3]  = static_cast<unsigned short> (score_sums[mem_index+3]  + tmp_score_sums[mem_index+3]);
-          score_sums[mem_index+4]  = static_cast<unsigned short> (score_sums[mem_index+4]  + tmp_score_sums[mem_index+4]);
-          score_sums[mem_index+5]  = static_cast<unsigned short> (score_sums[mem_index+5]  + tmp_score_sums[mem_index+5]);
-          score_sums[mem_index+6]  = static_cast<unsigned short> (score_sums[mem_index+6]  + tmp_score_sums[mem_index+6]);
-          score_sums[mem_index+7]  = static_cast<unsigned short> (score_sums[mem_index+7]  + tmp_score_sums[mem_index+7]);
-          score_sums[mem_index+8]  = static_cast<unsigned short> (score_sums[mem_index+8]  + tmp_score_sums[mem_index+8]);
-          score_sums[mem_index+9]  = static_cast<unsigned short> (score_sums[mem_index+9]  + tmp_score_sums[mem_index+9]);
-          score_sums[mem_index+10] = static_cast<unsigned short> (score_sums[mem_index+10] + tmp_score_sums[mem_index+10]);
-          score_sums[mem_index+11] = static_cast<unsigned short> (score_sums[mem_index+11] + tmp_score_sums[mem_index+11]);
-          score_sums[mem_index+12] = static_cast<unsigned short> (score_sums[mem_index+12] + tmp_score_sums[mem_index+12]);
-          score_sums[mem_index+13] = static_cast<unsigned short> (score_sums[mem_index+13] + tmp_score_sums[mem_index+13]);
-          score_sums[mem_index+14] = static_cast<unsigned short> (score_sums[mem_index+14] + tmp_score_sums[mem_index+14]);
-          score_sums[mem_index+15] = static_cast<unsigned short> (score_sums[mem_index+15] + tmp_score_sums[mem_index+15]);
-        }
-        for (size_t mem_index = mem_size_mod_16_base; mem_index < mem_size; ++mem_index)
-        {
-          score_sums[mem_index] = static_cast<unsigned short> (score_sums[mem_index] + tmp_score_sums[mem_index]);
-        }
-
-        memset (tmp_score_sums, 0, mem_size*sizeof (tmp_score_sums[0]));
-      }
-    }
-    {
-      for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
-      {
-        score_sums[mem_index] = static_cast<unsigned short> (score_sums[mem_index] + tmp_score_sums[mem_index]);
-      }
-        
-      memset (tmp_score_sums, 0, mem_size*sizeof (tmp_score_sums[0]));
-    }
-#else  // #ifdef __SSE2__
+#else
     unsigned short * score_sums = new unsigned short[mem_size];
-    //unsigned char * score_sums = new unsigned char[mem_size];
-    memset (score_sums, 0, mem_size*sizeof (score_sums[0]));
+#endif
+    pcl_linemodDetectTemplatesFixedScaleOne (
+      linemod_template, static_cast<int> (template_index),
+      template_threshold_, use_non_max_suppression_, average_detections_,
+      width, height, step_size,
+      modality_linearized_maps,
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+      modality_linearized_maps_1, modality_linearized_maps_2, modality_linearized_maps_3,
+#endif
+#if defined (__SSE2__)
+      score_sums, tmp_score_sums,
+#else
+      score_sums,
+#endif
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+      score_sums_1, score_sums_2, score_sums_3,
+#endif
+      thread_local_detections[0]);
 
-    int max_score = 0;
-    for (size_t feature_index = 0; feature_index < templates_[template_index].features.size (); ++feature_index)
+#ifdef __SSE2__
+    aligned_free (score_sums);
+    aligned_free (tmp_score_sums);
+#else
+    delete[] score_sums;
+#endif
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+    delete[] score_sums_1;
+    delete[] score_sums_2;
+    delete[] score_sums_3;
+#endif
+  }
+#else
+  #pragma omp parallel num_threads(omp_get_max_threads())
+  {
+#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
+    unsigned short * score_sums_1 = new unsigned short[mem_size];
+    unsigned short * score_sums_2 = new unsigned short[mem_size];
+    unsigned short * score_sums_3 = new unsigned short[mem_size];
+#endif
+#ifdef __SSE2__
+    unsigned short * score_sums = reinterpret_cast<unsigned short*> (aligned_malloc (mem_size*sizeof(unsigned short)));
+    unsigned char * tmp_score_sums = reinterpret_cast<unsigned char*> (aligned_malloc (mem_size*sizeof(unsigned char)));
+#else
+    unsigned short * score_sums = new unsigned short[mem_size];
+#endif
+
+    #pragma omp for schedule(static) nowait
+    for (size_t template_index = 0; template_index < templates_.size (); ++template_index)
     {
-      const QuantizedMultiModFeature & feature = templates_[template_index].features[feature_index];
-
-      //feature.modality_index;
-      for (size_t bin_index = 0; bin_index < 8; ++bin_index)
-      {
-        if ((feature.quantized_value & (0x1<<bin_index)) != 0)
-        {
+      const pcl::SparseQuantizedMultiModTemplate& linemod_template = getTemplate (static_cast<int> (template_index));
+      pcl_linemodDetectTemplatesFixedScaleOne (
+        linemod_template, static_cast<int> (template_index),
+        template_threshold_, use_non_max_suppression_, average_detections_,
+        width, height, step_size,
+        modality_linearized_maps,
 #ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
-          ++max_score;
-
-          unsigned char * data = modality_linearized_maps[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
-          unsigned char * data_1 = modality_linearized_maps_1[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
-          unsigned char * data_2 = modality_linearized_maps_2[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
-          unsigned char * data_3 = modality_linearized_maps_3[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
-          for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
-          {
-            score_sums[mem_index] += data[mem_index];
-            score_sums_1[mem_index] += data_1[mem_index];
-            score_sums_2[mem_index] += data_2[mem_index];
-            score_sums_3[mem_index] += data_3[mem_index];
-          }
+        modality_linearized_maps_1, modality_linearized_maps_2, modality_linearized_maps_3,
+#endif
+#if defined (__SSE2__)
+        score_sums, tmp_score_sums,
 #else
-          max_score += 4;
-
-          unsigned char * data = modality_linearized_maps[feature.modality_index][bin_index].getOffsetMap (feature.x, feature.y);
-          for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
-          {
-            score_sums[mem_index] += data[mem_index];
-          }
+        score_sums,
 #endif
-        }
-      }
-    }
-#endif  // #ifdef __SSE2__
-
-    const float inv_max_score = 1.0f / float (max_score);
-
-    // we compute a new threshold based on the threshold supplied by the user;
-    // this is due to the use of the cosine approx. in the response computation;
 #ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
-    const float raw_threshold = (4.0f * float (max_score) / 2.0f + template_threshold_ * (4.0f * float (max_score) / 2.0f));
-#else
-    const float raw_threshold = (float (max_score) / 2.0f + template_threshold_ * (float (max_score) / 2.0f));
+        score_sums_1, score_sums_2, score_sums_3,
 #endif
-
-    //int max_value = 0;
-    //size_t max_index = 0;
-    for (size_t mem_index = 0; mem_index < mem_size; ++mem_index)
-    {
-      //const float score = score_sums[mem_index] * inv_max_score;
-
-#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
-      const float raw_score = score_sums[mem_index] 
-        + score_sums_1[mem_index]
-        + score_sums_2[mem_index]
-        + score_sums_3[mem_index];
-
-      const float score = 2.0f * static_cast<float> (raw_score) * 0.25f * inv_max_score - 1.0f;
-#else
-      const float raw_score = score_sums[mem_index];
-
-      const float score = 2.0f * static_cast<float> (raw_score) * inv_max_score - 1.0f;
-#endif
-
-
-      //if (score > template_threshold_) 
-      if (raw_score > raw_threshold) /// \todo Ask Stefan why this line was used instead of the one above
-      {
-        const size_t mem_col_index = (mem_index % mem_width);
-        const size_t mem_row_index = (mem_index / mem_width);
-
-        if (use_non_max_suppression_)
-        {
-          bool is_local_max = true;
-          for (size_t sup_row_index = mem_row_index-1; sup_row_index <= mem_row_index+1 && is_local_max; ++sup_row_index)
-          {
-            if (sup_row_index >= mem_height)
-              continue;
-
-            for (size_t sup_col_index = mem_col_index-1; sup_col_index <= mem_col_index+1; ++sup_col_index)
-            {
-              if (sup_col_index >= mem_width)
-                continue;
-
-              if (score_sums[mem_index] < score_sums[sup_row_index*mem_width + sup_col_index])
-              {
-                is_local_max = false;
-                break;
-              }
-            } 
-          }
-
-          if (!is_local_max)
-            continue;
-        }
-
-        LINEMODDetection detection;
-
-        if (average_detections_)
-        {
-          size_t average_col = 0;
-          size_t average_row = 0;
-          size_t sum = 0;
-
-          for (size_t sup_row_index = mem_row_index-1; sup_row_index <= mem_row_index+1; ++sup_row_index)
-          {
-            if (sup_row_index >= mem_height)
-              continue;
-
-            for (size_t sup_col_index = mem_col_index-1; sup_col_index <= mem_col_index+1; ++sup_col_index)
-            {
-              if (sup_col_index >= mem_width)
-                continue;
-
-              const size_t weight = static_cast<size_t> (score_sums[sup_row_index*mem_width + sup_col_index]);
-              average_col += sup_col_index * weight;
-              average_row += sup_row_index * weight;
-              sum += weight;
-            } 
-          }
-
-          average_col *= step_size;
-          average_row *= step_size;
-
-          average_col /= sum;
-          average_row /= sum;
-
-          //std::cerr << mem_col_index << ", " << mem_row_index << " - " << average_col << ", " << average_row << std::endl;
-          std::cerr << mem_col_index*step_size << ", " << mem_row_index*step_size << " - " << average_col << ", " << average_row << std::endl;
-
-          const size_t detection_col_index = average_col;// * step_size;
-          const size_t detection_row_index = average_row;// * step_size;
-
-          detection.x = static_cast<int> (detection_col_index);
-          detection.y = static_cast<int> (detection_row_index);
-        }
-        else
-        {
-          const size_t detection_col_index = mem_col_index * step_size;
-          const size_t detection_row_index = mem_row_index * step_size;
-
-          detection.x = static_cast<int> (detection_col_index);
-          detection.y = static_cast<int> (detection_row_index);
-        }
-
-        detection.template_id = static_cast<int> (template_index);
-        detection.score = score;
-
-#ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
-        std::cerr << "score: " << static_cast<float> (raw_score) * inv_max_score * 0.25f << ", " << (2.0f * static_cast<float> (raw_score) * inv_max_score - 1.0f) << std::endl;
-        std::cerr << "score0: " << static_cast<float> (score_sums[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums[mem_index]) * inv_max_score - 1.0f) << std::endl;
-        std::cerr << "score1: " << static_cast<float> (score_sums_1[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums_1[mem_index]) * inv_max_score - 1.0f) << std::endl;
-        std::cerr << "score2: " << static_cast<float> (score_sums_2[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums_2[mem_index]) * inv_max_score - 1.0f) << std::endl;
-        std::cerr << "score3: " << static_cast<float> (score_sums_3[mem_index]) * inv_max_score << ", " << (2.0f * static_cast<float> (score_sums_3[mem_index]) * inv_max_score - 1.0f) << std::endl;
-#endif
-
-
-        detections.push_back (detection);
-      }
+        thread_local_detections[static_cast<std::size_t> (omp_get_thread_num ())]);
     }
 
 #ifdef __SSE2__
@@ -1035,13 +1161,27 @@ pcl::LINEMOD::detectTemplates (const std::vector<QuantizableModality*> & modalit
 #else
     delete[] score_sums;
 #endif
-
 #ifdef LINEMOD_USE_SEPARATE_ENERGY_MAPS
     delete[] score_sums_1;
     delete[] score_sums_2;
     delete[] score_sums_3;
 #endif
   }
+#endif
+
+  std::size_t total_new = 0;
+  for (const std::vector<LINEMODDetection>& slot : thread_local_detections)
+    total_new += slot.size ();
+  if (total_new != 0)
+  {
+    detections.reserve (detections.size () + total_new);
+    for (std::vector<LINEMODDetection>& slot : thread_local_detections)
+    {
+      if (!slot.empty ())
+        detections.insert (detections.end (), std::make_move_iterator (slot.begin ()), std::make_move_iterator (slot.end ()));
+    }
+  }
+
 
   // release data
   for (size_t modality_index = 0; modality_index < modality_linearized_maps.size (); ++modality_index)
